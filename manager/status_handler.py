@@ -1,0 +1,70 @@
+"""
+Module for /status API endpoint
+"""
+
+import logging
+
+from peewee import DoesNotExist, IntegrityError
+
+from common import AuthenticatedHandler
+from database.peewee_handler import PeeweeHandler
+from database.peewee_model import SystemPlatform, SystemVulnerabilities
+
+class StatusHandler(AuthenticatedHandler):
+    """Handler for /status endpoint"""
+
+    def get(self): # pylint: disable=arguments-differ, useless-super-delegation
+        raise NotImplementedError
+        #super(StatusHandler, self).get()
+
+    def post(self): # pylint: disable=arguments-differ, useless-super-delegation
+        """POST to set the status-id for a specified insights-id/cve combination
+           ---
+           description: POST to set the status-id for a specified insights-id/cve combination
+           parameters:
+             - name: insights_id
+               description: id of the system whose system/cve combination we're changing the status of
+               required: True
+             - name: cve
+               description: Name of the CVE whose system/cve combination we're changing the status of
+               required: True
+             - name: status-id
+               description: ID of the status we're changing the specified system/cve combination to
+               required: True
+           responses:
+             200:
+               description: status successfully changed
+             400:
+               description: either missing one of insights_id/cve/status_id, or bad status_id
+             404:
+               description: specified insights_id/cve does not exist or is not acceptable to requesting rh_account_num
+        """
+        super(StatusHandler, self).post()
+
+    def handle_post(self):
+        """Update the 'status' field for a system/cve combination"""
+        in_insights_id = self.get_argument('insights_id', '')
+        in_cve = self.get_argument('cve', '')
+        in_status_id = self.get_argument('status_id', '')
+        if not in_insights_id and in_cve and in_status_id:
+            # sysid/cve/acct must ALL be provided
+            self.raiseError(400)
+        logging.debug('SYSID [%s] CVE [%s] STATUS-ID [%s] ACCT [%s]',
+                      in_insights_id, in_cve, in_status_id, self.rh_account_number)
+        try:
+            vuln = (SystemVulnerabilities.select()
+                    .join(SystemPlatform)
+                    .where((SystemVulnerabilities.insights_id == in_insights_id) &
+                           (SystemVulnerabilities.cve == in_cve) &
+                           (SystemPlatform.rh_account == self.rh_account_number))
+                    .get())
+            vuln.status_id = in_status_id
+            vuln.save()
+            self.flush()
+        except DoesNotExist:
+            # sysid/cve/acct combination does not exist
+            self.raiseError(404, 'All of insights_id/cve/account-number are required')
+        except IntegrityError as integ_error:
+            # usually means bad-status-id
+            PeeweeHandler.rollback()
+            self.raiseError(400, str(integ_error))
