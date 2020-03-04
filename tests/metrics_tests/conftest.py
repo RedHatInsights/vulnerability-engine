@@ -1,0 +1,24 @@
+# -*- coding: utf-8 -*-
+# pylint:disable=missing-docstring
+
+import psycopg2
+import pytest
+
+from common import database_handler
+
+from ..utils import restore_db
+
+
+@pytest.fixture(scope='module')
+def pg_db_conn(pg_db_mod):
+    with database_handler.DatabasePool(1):
+        conn = psycopg2.connect(**pg_db_mod.dsn())
+        yield conn
+        conn.close()
+
+
+@pytest.fixture
+def cleanup(request):
+    def db_cleanup():
+        restore_db(database_handler.pg_testing)
+    request.addfinalizer(db_cleanup)
