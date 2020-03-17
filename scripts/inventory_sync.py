@@ -1,0 +1,80 @@
+#!/usr/bin/python3
+import os
+import sys
+import base64
+import json
+
+import psycopg2
+import requests
+
+DB_NAME = os.getenv('POSTGRESQL_DATABASE', "vulnerability")
+DB_USER = os.getenv('POSTGRESQL_USER', "ve_db_admin")
+DB_PASS = os.getenv('POSTGRESQL_PASSWORD', "ve_db_admin_pwd")
+DB_HOST = os.getenv('POSTGRESQL_HOST', "vulnerability-engine-database")
+DB_PORT = int(os.getenv('POSTGRESQL_PORT', "5432"))
+
+INVENTORY_HOST = os.getenv('INVENTORY_HOST', "insights-inventory.platform-ci.svc")
+INVENTORY_PORT = int(os.getenv('INVENTORY_PORT', "8080"))
+INVENTORY_URL = "http://%s:%s/api/inventory/v1/hosts/%s?per_page=100&page=1" % (INVENTORY_HOST, INVENTORY_PORT, "%s")
+
+
+def build_auth_header(account):
+    return base64.b64encode(json.dumps({
+        'identity': {
+            'account_number': account,
+            'user': {'username': 'vulnerability-cron'}
+            }}).encode()).decode()
+
+
+def main():
+    conn = psycopg2.connect(dbname=DB_NAME, user=DB_USER, password=DB_PASS, host=DB_HOST, port=DB_PORT)
+
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM system_platform")
+    db_records_cnt, = cur.fetchone()
+    cur.execute("SELECT COUNT(distinct rh_account_id) FROM system_platform")
+    db_accounts_cnt, = cur.fetchone()
+    print("Total %d systems in %d accounts in DB." % (db_records_cnt, db_accounts_cnt))
+    db_accounts = {}
+    cur.execute("SELECT id, name FROM rh_account")
+    for acc_id, acc_name in cur.fetchall():
+        db_accounts[acc_id] = acc_name
+    print("Total %s known accounts." % len(db_accounts))
+    for acc_id, acc_name in db_accounts.items():
+        cur.execute("SELECT inventory_id, last_upload from system_platform where rh_account_id = %s", (acc_id,))
+        auth_header = build_auth_header(acc_name)
+        headers = {
+            "x-rh-identity": auth_header
+        }
+        inventory_not_found_cnt = 0
+        inventory_not_found = {}
+        while True:
+            rows = cur.fetchmany(100)
+            if not rows:
+                break
+            inventory_ids = {row[0]: row[1] for row in rows}
+            response = requests.get(INVENTORY_URL % ",".join(inventory_ids), headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                inventory_not_found_cnt += len(inventory_ids) - data["count"]
+                for system in data["results"]:
+                    inventory_id = system["id"]
+                    del inventory_ids[inventory_id]
+                # Remaining systems are missing in inventory
+                if inventory_ids:
+                    inventory_not_found.update(inventory_ids)
+            else:
+                print("HTTP ERROR: %s" % response.status_code)
+                sys.exit(1)
+        if inventory_not_found_cnt:
+            print("Systems not found in inventory, account %s, total: %d:" % (acc_name, inventory_not_found_cnt))
+        for inventory_id, last_upload in inventory_not_found.items():
+            print("  %s (last upload %s)" % (inventory_id, last_upload))
+            # Delete it
+            cur.execute("SELECT delete_system(%s)", (inventory_id,))
+        conn.commit()
+
+    conn.close()
+
+if __name__ == "__main__":
+    main()
