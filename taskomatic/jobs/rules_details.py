@@ -1,0 +1,66 @@
+"""
+Periodic update of insights security rules
+"""
+
+from base64 import b64encode
+import json
+import os
+import requests
+
+import psycopg2
+from psycopg2.extras import execute_values
+
+from common.logging import get_logger
+
+DB_NAME = os.getenv('POSTGRESQL_DATABASE')
+DB_USER = os.getenv('POSTGRESQL_USER')
+DB_PASS = os.getenv('POSTGRESQL_PASSWORD')
+DB_HOST = os.getenv('POSTGRESQL_HOST')
+DB_PORT = int(os.getenv('POSTGRESQL_PORT', '5432'))
+
+INSIGHTS_RULES_API = os.getenv('INSIGHTS_RULES_API', 'http://platform_mock:8000/api/insights/v1/rule/')
+LOGGER = get_logger(__name__)
+
+
+def build_auth_header(account):
+    """Build base64 auth header"""
+    return b64encode(json.dumps({
+        'identity': {
+            'account_number': account,
+            'user': {'username': 'vulnerability-cron'}
+        }}).encode()).decode()
+
+
+def run():
+    """Application entrypoint"""
+    conn = psycopg2.connect(dbname=DB_NAME, user=DB_USER, password=DB_PASS, host=DB_HOST, port=DB_PORT)
+    cur = conn.cursor()
+
+    cur.execute("""SELECT name from rh_account LIMIT 1""")
+    headers = {
+        'x-rh-identity': build_auth_header(cur.fetchone()[0])
+    }
+
+    to_update = []
+    cur.execute("""SELECT id, name from insights_rule""")
+    for rule in cur.fetchall():
+        response = requests.get('%s%s' % (INSIGHTS_RULES_API, rule[1]), headers=headers)
+        if response.status_code != 200:
+            LOGGER.error('Got %s status code from insights API', response.status_code)
+            continue
+        response_dict = json.loads(response.content)
+        to_update.append((rule[0], response_dict['description'], response_dict['summary'], response_dict['generic'], response_dict['reboot_required'],
+                          response_dict['playbook_count'], response_dict['resolution_set'][0]['resolution_risk']['risk'], response_dict['node_id'],
+                          response_dict['impacted_systems_count'],))
+
+    if to_update:
+        execute_values(cur, """UPDATE insights_rule AS ir SET description_text = v.description, summary_text = v.summary, generic_text = v.generic,
+                            reboot_required = v.reboot_required, playbook_count = v.playbook_count, change_risk = v.change_risk,
+                            kbase_node_id = v.kbase_node_id, systems_affected = v.systems_affected FROM (VALUES %s)
+                            AS v(id, description, summary, generic, reboot_required, playbook_count, change_risk, kbase_node_id, systems_affected)
+                            WHERE v.id = ir.id""",
+                       to_update, template='(%s::integer, %s, %s, %s, %s, %s::integer, %s::integer, %s::integer, %s::integer)', page_size=len(to_update))
+        conn.commit()
+
+    cur.close()
+    conn.close()
