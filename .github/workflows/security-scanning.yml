@@ -4,7 +4,7 @@
 # documentation.
 
 # The default values used in the docker build commands are the root
-# directory '.' and the dockerfile name of 'Dockerfile'. If there is 
+# directory '.' and the dockerfile name of 'Dockerfile'. If there is
 # a need to change these do so in your local workflow template (this file) and
 # change them there. HINT: Look at the bottom of this file.
 
